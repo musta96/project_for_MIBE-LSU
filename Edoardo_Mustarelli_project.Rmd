@@ -1,0 +1,385 @@
+---
+title: "London Restaurant Scene project- MIBE"
+author: "Edoardo Mustarelli"
+date: "6/3/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#### Let's start with the analysis of the files. First I am going to load the libraries necessary, or that may be necessary, to move on with the analysis.
+
+```{r libraries, message=FALSE, warning=FALSE}
+# ipak function: install and load multiple R packages.
+# check to see if packages are installed. Install them if they are not, then load them into the R session.
+
+ipak <- function(pkg){
+new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+sapply(pkg, require, character.only = TRUE)
+}
+
+# usage
+packages <- c("dplyr", "tidyverse", "tidyr", "here", "magrittr", "purrr", "purrrlyr", "ggplot2", "formattable", "rlist", "gtools", "tm", "SnowballC", "wordcloud","RColorBrewer", "sf", "tmap", "tmaptools", "rgdal", "rgeos", "ggmap", "tidytext", "ggraph", "readr", "htmltools", "webshot")
+ipak(packages)
+
+```
+```{r datasets}
+restaurants_info <- readRDS(file="C:/Users/Edoardo/Desktop/LSU_project/resturants-mibe.rds")
+info_delivery <- readRDS(file="C:/Users/Edoardo/Desktop/LSU_project/delivery-mibe.rds")
+```
+I now want to inspect the dataset regarding the restaurants' information to have a better understanding of what I'm working with.
+```{r inspection}
+glimpse(restaurants_info)
+head(restaurants_info)
+
+```
+We can see that the restaurants_info file has 7 variables which are id, name, brand, postcode, neighborhood, rating, and menu item price. We can also see that we have the data for 5,786 restaurants in London.
+#### 1 Restaurant Information Analysis
+
+###### 1.1 top 10 neighborhoods by the number of restaurants
+
+```{r}
+top10_neighborhoods <- restaurants_info %>%
+  group_by(rest_neighborhood) %>%
+  filter(!is.na(rest_neighborhood)) %>%
+  summarise(number_of_rest=n()) %>%
+  arrange(-number_of_rest) %>%
+  slice(1:10)
+top10_neighborhoods
+```
+```{r}
+top10_neighborhoods$number_of_rest <- as.numeric(top10_neighborhoods$number_of_rest)
+
+top10_neighborhoods %>%
+ggplot(aes(reorder(rest_neighborhood, -number_of_rest), number_of_rest, fill=-number_of_rest)) +
+  geom_bar(stat = "identity")+
+  labs(x = "Neighborhoods", y = "Number of Restaurants", fill="# of rest")+
+  ggtitle("Top 10 neighborhoods ranked by number of restaurants")+
+  coord_flip()+
+  ggsave("10neigh_by_#rest.png")
+```
+
+###### 1.2 top 10 neighborhoods by the restaurant review score
+
+```{r}
+top10_neig_ratings <- restaurants_info %>%
+  group_by(rest_neighborhood) %>%
+  summarise_at(vars(rest_rating),list(~mean(., na.rm = TRUE))) %>%
+  arrange(-rest_rating) %>%
+  slice(1:10)
+top10_neig_ratings
+```
+```{r}
+top10_neig_ratings %>%
+ggplot(aes(reorder(rest_neighborhood, -rest_rating), rest_rating, fill=-rest_rating)) +
+  geom_bar(stat = "identity")+
+  labs(x = "Neighborhoods", y = "Average Rating", fill="rating")+
+  ggtitle("Top 10 neighborhoods ranked by average ratings of the restaurants")+
+  coord_flip()+
+  ggsave("10neigh_by_avg_rating.png")
+```
+
+```{r}
+top_neigh_overall <- inner_join(top10_neighborhoods, top10_neig_ratings)
+top_neigh_overall
+```
+###### 1.3 Top 10 biggest chains
+
+```{r}
+top_chains <- restaurants_info %>%
+  group_by(rest_brand) %>%
+  filter(!is.na(rest_brand)) %>%
+  summarise(number_of_spots = n()) %>%
+  arrange(-number_of_spots) %>%
+  slice(1:10)
+top_chains
+```
+```{r}
+top_chains$number_of_spots <- as.numeric(top_chains$number_of_spots)
+ webshot::install_phantomjs(force = TRUE)
+
+export_formattable <- function(f, file, width = "100%", height = NULL, 
+                               background = "white", delay = 0.2)
+    {
+      w <- as.htmlwidget(f, width = width, height = height)
+      path <- html_print(w, background = background, viewer = NULL)
+      url <- paste0("file:///", gsub("\\\\", "/", normalizePath(path)))
+      webshot(url,
+              file = file,
+              selector = ".formattable_widget",
+              delay = delay)
+    }
+
+FT <- top_chains %>%
+  formattable(align = c("l","c"), list(number_of_spots = color_bar(("lightseagreen"))))
+
+export_formattable(FT,"FT.png")
+
+FT
+
+```
+
+
+###### 1.4 Average menu price and number of items for each restaurant
+
+```{r, message = FALSE, warning = FALSE}
+number_of_items_gross <- restaurants_info %>%
+  filter(restaurant_id %>%
+           map_lgl(any)) %>%
+  unnest(rest_menu_item_price)
+number_of_items_gross
+
+number_of_items_net <- number_of_items_gross[apply(number_of_items_gross[c(7)],1, function(del) any(!del==0)),]
+number_of_items_net
+```
+
+```{r}
+num_of_items <- number_of_items_net %>%
+  group_by(rest_name) %>%
+  summarise(num_items_menu = n()) %>%
+  arrange(-num_items_menu)
+num_of_items
+```
+
+```{r}
+avg_price <- number_of_items_net %>%
+  group_by(restaurant_id, rest_name) %>%
+  filter(!is.na(restaurant_id)) %>%
+  summarise_at(vars(rest_menu_item_price), list(~mean(.)), na.rm = TRUE)
+
+colnames(avg_price)[3] <- "Avg_price"
+
+avg_price$Avg_price <- sprintf(avg_price$Avg_price, fmt="%#.4f")
+
+avg_price
+
+```
+
+###### 1.5 how many items on the 5 most expensive restaurants' menus?
+
+```{r}
+#I want to create a joint dataset between the number of items per menu and the average price
+
+how_many_for_how_much <- left_join(num_of_items, avg_price)
+
+how_many_for_how_much$Avg_price <- as.numeric(how_many_for_how_much$Avg_price)
+
+most_expensive <-  how_many_for_how_much %>%
+  arrange(-Avg_price) %>%
+  slice(1:5)
+most_expensive
+
+```
+
+```{r}
+most_expensive %>%
+ggplot(aes(reorder(rest_name, num_items_menu), num_items_menu, fill=-Avg_price)) +
+  geom_bar(stat = "identity")+
+  labs(x = "Name", y = "# of items", fill="avg price")+
+  ggtitle("5 most expensive restaurants with relative number of items")+
+  coord_flip()+
+  ggsave("who_howmuch_howmany.png")
+```
+
+From this last graph we can observe how there is almost an inverse relationship between the number of items listed on the menus and the average price. As a matter of fact, the two most expensive restaurants also happen to be the ones with less items on their menus. But we can also see that 4/5 of these ase catering services.
+
+###### 1.6 how many items on the 5 mleast expensive restaurants' menus?
+
+```{r}
+least_expensive <-  how_many_for_how_much %>%
+  arrange(Avg_price) %>%
+  slice(1:5)
+least_expensive
+```
+```{r}
+least_expensive %>%
+ggplot(aes(reorder(rest_name, num_items_menu), num_items_menu, fill=-Avg_price)) +
+  geom_bar(stat = "identity")+
+  labs(x = "Name", y = "# of items", fill="avg price")+
+  ggtitle("5 least expensive restaurants with relative number of items")+
+  coord_flip()+
+  ggsave("who_howlittle_howmany.png")
+```
+
+```{r}
+all_prices <- full_join(most_expensive, least_expensive)
+
+all_prices %>%
+ggplot(aes(reorder(rest_name, num_items_menu), num_items_menu, fill=-Avg_price)) +
+  geom_bar(stat = "identity")+
+  labs(x = "Name", y = "# of items", fill="avg price")+
+  ggtitle("5 most & least expensive restaurants with relative number of items")+
+  coord_flip()+
+  ggsave("all_prices.png")
+```
+
+
+#### 2 Restaurants Delivery Times Analysis
+
+```{r}
+colnames(info_delivery)[1] <- "restaurant_id"
+
+complete_rest_data <- left_join(info_delivery, restaurants_info, by = "restaurant_id")
+glimpse(complete_rest_data)
+
+```
+
+
+###### 2.1 How many neighborhoods does each restaurant deliver to?
+
+```{r}
+deliveries_where <- complete_rest_data %>%
+  group_by(restaurant_id) %>%
+  summarise(num_place_of_delivery = n())
+
+glimpse(deliveries_where)
+
+```
+
+###### 2.2 Top 15 neighborhoods for number of restaurants served by.
+
+```{r}
+deliveries_by <- complete_rest_data %>%
+  group_by(neighborhood_name) %>%
+  summarise(how_many_deliver = n()) %>%
+  arrange(-how_many_deliver) %>%
+  slice(1:15)
+
+glimpse(deliveries_by)
+```
+
+```{r}
+deliveries_by %>%
+ggplot(aes(reorder(neighborhood_name, how_many_deliver), how_many_deliver, fill=neighborhood_name)) +
+  geom_bar(stat = "identity")+
+  labs(x = "Name", y = "# restaurants delivering", fill="avg price")+
+  ggtitle("15 top neighborhoods by # of restaurants that deliver there")+
+  coord_flip()+
+  ggsave("most_served.png")
+```
+
+###### 2.3 Average delivery time per restaurant
+
+```{r}
+avg_del_time <- complete_rest_data %>%
+  group_by(restaurant_id, rest_name, rest_postcode, rest_rating) %>%
+  summarise(avg_time = mean(rest_delivery_time_min, na.rm = TRUE))
+avg_del_time
+```
+
+###### 2.4 Top 20 fastest restaurants.
+
+```{r}
+avg_del_time$avg_time <- as.integer(avg_del_time$avg_time)
+
+glimpse(avg_del_time)
+```
+
+```{r}
+fastest20 <- avg_del_time %>%
+  arrange(-avg_time) %>%
+  head(20)
+fastest20
+```
+
+```{r}
+export_formattable <- function(f, file, width = "100%", height = NULL, 
+                               background = "white", delay = 0.2)
+    {
+      w <- as.htmlwidget(f, width = width, height = height)
+      path <- html_print(w, background = background, viewer = NULL)
+      url <- paste0("file:///", gsub("\\\\", "/", normalizePath(path)))
+      webshot(url,
+              file = file,
+              selector = ".formattable_widget",
+              delay = delay)
+    }
+
+f20 <- fastest20 %>%
+  subset(select = -restaurant_id) %>%
+  relocate(avg_time, .before = rest_postcode) %>%
+  relocate(Ratings = rest_rating, .before = rest_postcode)
+
+FT2 <- f20 %>%
+  formattable(align = c("l", "c", "c", "l"), list(avg_time = color_bar(("lightseagreen"))))
+
+export_formattable(FT2,"FT2.png")
+
+FT2
+```
+
+#### 3 Open Analysis
+
+By looking at this data one question comes to my mind almost immediately. Are restaurants located in those neighborhoods that are served by the highest number of delivery places?
+
+I start by creating a new data frame that contains the data all the data from the restaurants and their deliveries, but only for the top 10 neighborhoods for number of restaurants. 
+```{r}
+complete_data_fortified <- inner_join(complete_rest_data, top10_neighborhoods, by = "rest_neighborhood")
+complete_data_fortified
+```
+I now want to calculate how many restaurants deliver to a neighborhood and where they are from.
+```{r}
+new_ranking <- complete_data_fortified %>%
+  group_by(neighborhood_name, rest_neighborhood) %>%
+  summarise(how_many_to_and_from = n()) %>%
+  arrange(-how_many_to_and_from) %>%
+  slice(1:15)
+new_ranking
+```
+
+I now want to join together the previous set with how many restaurants deliver to each neighborhood (just the 15 neighborhoods with the highest number of restaurants that deliver there)
+```{r}
+who_delivers <- inner_join(new_ranking, deliveries_by)
+who_delivers
+```
+At this point I am interested in knowing just the number of restaurants that deliver to each neighborhood and from which neighborhood they are.
+
+```{r}
+from_where <- who_delivers %>%
+  subset(select = c("neighborhood_name", "rest_neighborhood", "how_many_to_and_from"))
+from_where
+```
+
+```{r}
+how_many <- who_delivers %>%
+  subset(select = c("neighborhood_name", "rest_neighborhood", "how_many_deliver"))
+how_many
+```
+
+```{r}
+library(reshape)
+from_where.m <- melt(from_where)
+
+from_where.m
+```
+
+
+```{r}
+ggplot(from_where.m, aes(neighborhood_name, value, fill = rest_neighborhood)) + 
+  geom_bar(stat="identity", position = "dodge")+
+  labs(y = "Number of restaurants delivering", x = "Neighborhood", fill = "Who delivers is from", title = "From where do restaurants deliver to?")+
+  coord_flip()+
+  ggsave("fromwhere.png")
+```
+In this graph we can see how the top 15 neighborhoods for number of restaurants served by, are segmented between the restaurants located in 3 of the top 10 neighborhood for number of restaurants.
+
+```{r}
+how_many.m <- melt(how_many)
+
+how_many.m
+```
+```{r}
+ggplot(how_many.m, aes(neighborhood_name, value, fill = neighborhood_name)) + 
+  geom_bar(stat="identity", position = "dodge")+
+  labs(y = "Number of restaurants delivering", x = "Neighborhood", fill = "Deliver to")+
+  coord_flip()+
+  ggsave("howmany.png")
+```
+
+Based also on this last chart, I would then seggest restaurants that are not on the territory to maybe think of opening stores in the neighborhoods more served, as it may represent a way of, in the long run, reducing costs due to delivery and increasing their revenues as well.
+
